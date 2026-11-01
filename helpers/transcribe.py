@@ -1,4 +1,12 @@
-"""Transcribe a video with ElevenLabs Scribe.
+"""Transcribe a video with ElevenLabs Scribe (or offline speech detection).
+
+Offline / iPad mode: when there is no ELEVENLABS_API_KEY, when ElevenLabs
+can't be reached (e.g. a sandboxed cloud workspace driven from an iPad), or
+when --offline is passed, the audio is analysed locally with ffmpeg's
+silencedetect instead. The output keeps the Scribe JSON shape, but each
+"word" is a speech segment labelled like "[speech 3.4s]" rather than real
+words. Cutting dead air, grading and rendering all still work; word-level
+subtitles and filler-word removal need a real transcript.
 
 Extracts mono 16kHz audio via ffmpeg, uploads to Scribe with verbatim +
 diarize + audio events + word-level timestamps, writes the full response
@@ -27,9 +35,6 @@ import time
 import wave
 from pathlib import Path
 
-import requests
-
-
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
 
@@ -43,10 +48,8 @@ def load_api_key() -> str:
                 k, v = line.split("=", 1)
                 if k.strip() == "ELEVENLABS_API_KEY":
                     return v.strip().strip('"').strip("'")
-    v = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not v:
-        sys.exit("ELEVENLABS_API_KEY not found in .env or environment")
-    return v
+    # Empty string means "no key": callers fall back to offline mode.
+    return os.environ.get("ELEVENLABS_API_KEY", "")
 
 
 def count_audio_tracks(video_path: Path) -> int:
@@ -81,6 +84,64 @@ def extract_audio(video_path: Path, dest: Path, audio_track: int = 0) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def offline_segments(audio_path: Path, noise_db: float = -35.0,
+                     min_silence: float = 0.4) -> dict:
+    """Speech/silence map from ffmpeg silencedetect, shaped like a Scribe response.
+
+    No network, no models: works anywhere ffmpeg runs. Each speech stretch
+    becomes one 'word' entry so pack_transcripts.py, timeline_view.py and
+    the EDL workflow keep working unchanged.
+    """
+    import re
+
+    dur_out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(audio_path)],
+        capture_output=True, text=True,
+    )
+    duration = float(dur_out.stdout.strip() or 0.0)
+    det = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(audio_path),
+         "-af", f"silencedetect=noise={noise_db}dB:d={min_silence}",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    silences: list[tuple[float, float]] = []
+    start = None
+    for line in det.stderr.splitlines():
+        m = re.search(r"silence_start: (-?[0-9.]+)", line)
+        if m:
+            start = max(0.0, float(m.group(1)))
+            continue
+        m = re.search(r"silence_end: ([0-9.]+)", line)
+        if m and start is not None:
+            silences.append((start, float(m.group(1))))
+            start = None
+    if start is not None:
+        silences.append((start, duration))
+
+    words: list[dict] = []
+    cursor = 0.0
+    for s_start, s_end in silences + [(duration, duration)]:
+        if s_start - cursor >= 0.15:
+            words.append({"type": "word", "text": f"[speech {s_start - cursor:.1f}s]",
+                          "start": round(cursor, 3), "end": round(s_start, 3),
+                          "speaker_id": None})
+        if s_end > s_start:
+            words.append({"type": "spacing", "text": " ",
+                          "start": round(s_start, 3), "end": round(s_end, 3)})
+        cursor = max(cursor, s_end)
+
+    return {
+        "offline": True,
+        "note": ("Offline speech map (ffmpeg silencedetect), not a transcript. "
+                 "Entries are speech stretches, not words."),
+        "language_code": None,
+        "text": "",
+        "words": words,
+    }
+
+
 def call_scribe(
     audio_path: Path,
     api_key: str,
@@ -97,6 +158,8 @@ def call_scribe(
         data["language_code"] = language
     if num_speakers:
         data["num_speakers"] = str(num_speakers)
+
+    import requests  # only needed for the online path
 
     with open(audio_path, "rb") as f:
         resp = requests.post(
@@ -133,6 +196,7 @@ def transcribe_one(
     num_speakers: int | None = None,
     verbose: bool = True,
     audio_track: int = 0,
+    offline: bool = False,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
 
@@ -172,10 +236,21 @@ def transcribe_one(
                    if n_tracks > 1 else "Check the source audio.")
             )
 
-        size_mb = audio.stat().st_size / (1024 * 1024)
-        if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
+        payload = None
+        if api_key and not offline:
+            size_mb = audio.stat().st_size / (1024 * 1024)
+            if verbose:
+                print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
+            try:
+                payload = call_scribe(audio, api_key, language, num_speakers)
+            except Exception as e:  # unreachable network, proxy block, bad key...
+                if verbose:
+                    print(f"  ElevenLabs unavailable ({str(e)[:120]}); "
+                          "using offline speech detection", flush=True)
+        if payload is None:
+            if verbose:
+                print("  offline mode: detecting speech with ffmpeg", flush=True)
+            payload = offline_segments(audio)
 
     out_path.write_text(json.dumps(payload, indent=2))
     dt = time.time() - t0
@@ -218,6 +293,11 @@ def main() -> None:
              "and the mic on track 1; without this ffmpeg applies its default audio "
              "stream selection, which picks the track with the most channels.",
     )
+    ap.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip ElevenLabs and map speech locally with ffmpeg (iPad / no-key mode).",
+    )
     args = ap.parse_args()
 
     video = args.video.resolve()
@@ -234,6 +314,7 @@ def main() -> None:
         language=args.language,
         num_speakers=args.num_speakers,
         audio_track=args.audio_track,
+        offline=args.offline,
     )
 
 

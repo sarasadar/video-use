@@ -60,6 +60,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
 - `ELEVENLABS_API_KEY` resolves — either in the environment or in `.env` at the video-use repo root. If missing, ask the user to paste one and write it to `.env` (never to the user's `<videos_dir>`).
+- **Offline / iPad mode.** If there is no key, the user doesn't want one, or ElevenLabs can't be reached (a cloud workspace driven from an iPad or phone usually can't), don't block: the transcribe helpers fall back to an ffmpeg speech map automatically (`--offline` forces it). Transcript JSON then has `"offline": true`, and `takes_packed.md` lines read `[speech 3.4s]` instead of words. In this mode: snap cuts to speech-segment edges instead of word boundaries (Hard Rule 6 applies to those edges), use `timeline_view` more often since you can't read what is said, and tell the user up front that filler-word removal and auto-subtitles need a real transcript — offer subtitles from text they type instead. See `IPAD.md`.
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.

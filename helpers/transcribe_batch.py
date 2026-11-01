@@ -62,6 +62,11 @@ def main() -> None:
         default=0,
         help="Zero-based audio track to transcribe (OBS: 0 = game, 1 = mic).",
     )
+    ap.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip ElevenLabs and map speech locally with ffmpeg (iPad / no-key mode).",
+    )
     args = ap.parse_args()
 
     videos_dir = args.videos_dir.resolve()
@@ -85,6 +90,8 @@ def main() -> None:
         return
 
     api_key = load_api_key()
+    if not api_key and not args.offline:
+        print("no ELEVENLABS_API_KEY: using offline speech detection")
 
     print(f"transcribing {len(pending)} files with {args.workers} parallel workers")
     t0 = time.time()
@@ -101,6 +108,7 @@ def main() -> None:
                 num_speakers=args.num_speakers,
                 verbose=False,
                 audio_track=args.audio_track,
+                offline=args.offline,
             ): v
             for v in pending
         }

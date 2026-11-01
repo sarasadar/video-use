@@ -47,6 +47,10 @@ And in the session:
 
 It inventories the sources, proposes a strategy, waits for your OK, then produces `edit/final.mp4` next to your sources. All outputs live in `<videos_dir>/edit/` — the skill directory stays clean.
 
+## Using it from an iPad (no computer)
+
+You don't need a computer or any commands. Open a Claude chat that can use this repo (claude.ai or the Claude app), attach your clips, and say what you want in plain words. If the ElevenLabs transcription service isn't available, video-use switches to an offline mode that still cuts pauses, grades and renders. See [IPAD.md](IPAD.md).
+
 ## Manual install
 
 If you'd rather do it by hand:
